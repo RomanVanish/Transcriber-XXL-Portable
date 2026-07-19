@@ -1,0 +1,6 @@
+*
+!.gitignore
+!*.py
+!*.bat
+!*.md
+!purfview FastWhisper parameters.txt
