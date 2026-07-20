@@ -88,8 +88,8 @@ def probe_summary(path):
 
 def model_label(name):
     on_disk = os.path.isdir(os.path.join(MODELS_DIR, f"faster-whisper-{name}"))
-    return (f"{name} (на диске)" if on_disk
-            else f"{name} (скачается, ~{MODEL_SIZES.get(name, '?')})")
+    return (f"whisper-{name} (на диске)" if on_disk
+            else f"whisper-{name} (скачается, ~{MODEL_SIZES.get(name, '?')})")
 
 
 def info_icon(text):
