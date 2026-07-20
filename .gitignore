@@ -4,3 +4,6 @@
 !*.bat
 !*.md
 !purfview FastWhisper parameters.txt
+!launcher.cs
+!T.ico
+!setup.ps1

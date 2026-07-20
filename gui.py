@@ -19,9 +19,10 @@ SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
 PARAMS_HELP_PATH = os.path.join(APP_DIR, "purfview FastWhisper parameters.txt")
 MODELS_DIR = os.path.join(APP_DIR, "xxl", "_models")
 FFPROBE = os.path.join(APP_DIR, "ffmpeg", "ffprobe.exe")
+ICON_PATH = os.path.join(APP_DIR, "T.ico")
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QListWidget, QComboBox, QCheckBox,
@@ -40,9 +41,8 @@ AUDIO_EXTS = {".wav", ".mp3", ".opus", ".ogg", ".m4a", ".aac", ".flac", ".wma",
               ".ts", ".wmv"}
 TXT_EXTS = {".txt", ".srt", ".vtt", ".md"}
 
-MODELS = ["large-v3-turbo", "large-v3", "large-v2", "medium", "small"]
-MODEL_SIZES = {"large-v3-turbo": "1.6 ГБ", "large-v3": "3 ГБ",
-               "large-v2": "3 ГБ", "medium": "1.5 ГБ", "small": "0.5 ГБ"}
+MODELS = ["large-v3-turbo", "large-v3"]
+MODEL_SIZES = {"large-v3-turbo": "1.6 ГБ", "large-v3": "3 ГБ"}
 
 
 # ── настройки ────────────────────────────────────────────────────────
@@ -134,6 +134,9 @@ TIP_COMPUTE = (
     "    и прожорливый по памяти. Практического смысла обычно нет.\n"
     "float16 — половинная точность, стандарт для GPU (~100%,\n"
     "    отличия от эталона на уровне случайности). На CPU медленный.\n"
+    "int8_float16 — веса int8, расчёт в float16. Режим для видеокарт\n"
+    "    с небольшим объёмом памяти (~4 ГБ): почти качество float16,\n"
+    "    но заметно меньше VRAM. Только для CUDA.\n"
     "int8_float32 — веса сжаты до int8, расчёт в float32.\n"
     "    Лучший режим для CPU: ~99-100% качества, в ~2 раза быстрее\n"
     "    float32 и вдвое меньше памяти. На часовой записи отличия —\n"
@@ -445,14 +448,43 @@ class TranscribeTab(QWidget):
         self.speakers.addItems(["Авто", "1", "2", "3", "4", "5", "6"])
         self.speakers.setCurrentText(settings.get("speakers", "2"))
         grid.addWidget(self.speakers, 0, 3)
-        grid.addWidget(QLabel("Модель:"), 0, 4)
+        model_lbl = QHBoxLayout()
+        model_lbl.addWidget(QLabel("Модель:"))
+        model_lbl.addWidget(info_icon(
+            "Встроенные модели Whisper докачиваются автоматически при\n"
+            "первом использовании (в папку xxl\\_models, остаются в сборке).\n"
+            "\n"
+            "«Своя модель (папка)...» — подключение стороннего файнтюна\n"
+            "(например, дообученного под русский). Требования:\n"
+            "  - формат CTranslate2 / faster-whisper: папка, внутри которой\n"
+            "    лежат model.bin, config.json и tokenizer.json (или\n"
+            "    vocabulary.*). На HuggingFace такие варианты помечают\n"
+            "    «ct2», «faster-whisper» или кладут в подпапку ct2*;\n"
+            "  - архитектура Whisper (large/turbo и т.п.);\n"
+            "  - «обычные» модели transformers (model.safetensors) в этом\n"
+            "    виде НЕ подойдут — их нужно сначала конвертировать\n"
+            "    утилитой ct2-transformers-converter.\n"
+            "\n"
+            "Выбранная папка запоминается. Диаризация от модели не зависит."))
+        model_lbl.addStretch()
+        grid.addLayout(model_lbl, 0, 4)
         self.model = QComboBox()
         for m in MODELS:
             self.model.addItem(model_label(m), m)
+        self.model.addItem("Своя модель (папка)...", "custom")
+        self.custom_model_path = settings.get("custom_model", "")
         saved_model = settings.get("model", "large-v3-turbo")
-        for i in range(self.model.count()):
-            if self.model.itemData(i) == saved_model:
-                self.model.setCurrentIndex(i)
+        if saved_model == "custom" and os.path.isdir(self.custom_model_path):
+            i = self.model.count() - 1
+            self.model.setItemText(
+                i, f"Своя: {os.path.basename(self.custom_model_path)}")
+            self.model.setCurrentIndex(i)
+        else:
+            for i in range(self.model.count()):
+                if self.model.itemData(i) == saved_model:
+                    self.model.setCurrentIndex(i)
+        self._prev_model_index = self.model.currentIndex()
+        self.model.activated.connect(self._on_model_activated)
         grid.addWidget(self.model, 0, 5)
 
         grid.addWidget(QLabel("Устройство:"), 1, 0)
@@ -520,8 +552,8 @@ class TranscribeTab(QWidget):
         compute_lbl.addStretch()
         ag.addLayout(compute_lbl, 0, 2)
         self.compute = QComboBox()
-        self.compute.addItems(["авто", "int8", "int8_float32",
-                               "float16", "float32"])
+        self.compute.addItems(["авто", "int8", "int8_float16",
+                               "int8_float32", "float16", "float32"])
         self.compute.setCurrentText(settings.get("compute", "авто"))
         ag.addWidget(self.compute, 0, 3)
         self.vad = QCheckBox("VAD-фильтр (пропуск тишины)")
@@ -607,6 +639,32 @@ class TranscribeTab(QWidget):
         else:
             self.files.set_status(path, "   ✗ ошибка", "#e08080")
 
+    def _on_model_activated(self, index):
+        if self.model.itemData(index) != "custom":
+            self._prev_model_index = index
+            return
+        start_dir = (self.custom_model_path
+                     if os.path.isdir(self.custom_model_path) else APP_DIR)
+        d = QFileDialog.getExistingDirectory(
+            self, "Папка модели (формат CTranslate2 / faster-whisper)",
+            start_dir)
+        if not d:
+            self.model.setCurrentIndex(self._prev_model_index)
+            return
+        missing = [f for f in ("model.bin", "config.json")
+                   if not os.path.isfile(os.path.join(d, f))]
+        if missing:
+            QMessageBox.warning(
+                self, "Не похоже на модель",
+                "В папке не найдено: " + ", ".join(missing) +
+                ".\nНужна модель в формате CTranslate2 / faster-whisper\n"
+                "(подробности — в подсказке ⓘ рядом со списком моделей).")
+            self.model.setCurrentIndex(self._prev_model_index)
+            return
+        self.custom_model_path = d
+        self.model.setItemText(index, f"Своя: {os.path.basename(d)}")
+        self._prev_model_index = index
+
     def _update_mode_ui(self):
         i = self.mode.currentIndex()
         # 0 Диалог(авто), 1 Дорожки, 2 Стерео, 3 Диаризация, 4 Монолог
@@ -630,7 +688,10 @@ class TranscribeTab(QWidget):
         a += ["--mode", mode_map[self.mode.currentIndex()]]
         if self.speakers.currentText() != "Авто":
             a += ["--speakers", self.speakers.currentText()]
-        a += ["--model", self.model.currentData()]
+        if self.model.currentData() == "custom":
+            a += ["--model", self.custom_model_path]
+        else:
+            a += ["--model", self.model.currentData()]
         dev = {"Авто": "auto", "CPU": "cpu", "CUDA": "cuda"}[self.device.currentText()]
         a += ["--device", dev]
         a += ["--language", self.language.currentText()]
@@ -671,6 +732,13 @@ class TranscribeTab(QWidget):
             QMessageBox.warning(self, "Нет форматов",
                                 "Отметьте хотя бы один выходной формат.")
             return
+        if (self.model.currentData() == "custom"
+                and not os.path.isdir(self.custom_model_path)):
+            QMessageBox.warning(self, "Модель не найдена",
+                                "Папка своей модели не существует:\n"
+                                + (self.custom_model_path or "(не выбрана)")
+                                + "\nВыберите её заново в списке моделей.")
+            return
         self.console.clear()
         self.b_start.setEnabled(False)
         self.b_stop.setEnabled(True)
@@ -710,6 +778,7 @@ class TranscribeTab(QWidget):
                            if cb.isChecked()]
         s["speakers"] = self.speakers.currentText()
         s["model"] = self.model.currentData()
+        s["custom_model"] = self.custom_model_path
         s["device"] = self.device.currentText()
         s["language"] = self.language.currentText()
         for cb, key in ((self.f_time, "f_time"), (self.f_txt, "f_txt"),
@@ -1397,7 +1466,14 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # Без своего AppUserModelID Windows группирует окно с python.exe
+    # и показывает в панели задач иконку Python, а не нашу.
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        "TranscriberXXL.Portable")
     app = QApplication(sys.argv)
+    if os.path.isfile(ICON_PATH):
+        app.setWindowIcon(QIcon(ICON_PATH))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

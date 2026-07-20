@@ -82,6 +82,31 @@ def probe(path):
 
 
 # ── Определение устройства ───────────────────────────────────────────
+def resolve_model(model):
+    """Если --model — папка с моделью, подключить её через junction.
+
+    XXL принимает только ИМЯ модели и ищет папку faster-whisper-<имя>
+    в своём _models. Для произвольной пользовательской папки создаём
+    там NTFS-ссылку (mklink /J: мгновенно, места не занимает) и отдаём
+    XXL имя «_custom».
+    """
+    if not os.path.isdir(model):
+        return model
+    target = os.path.abspath(model)
+    link = os.path.join(APP_DIR, "xxl", "_models", "faster-whisper-_custom")
+    if os.path.isdir(link):
+        try:
+            if os.path.samefile(link, target):
+                return "_custom"
+        except OSError:
+            pass
+        os.rmdir(link)  # удаляет только ссылку, не содержимое
+    subprocess.run(["cmd", "/c", "mklink", "/J", link, target],
+                   capture_output=True, creationflags=NO_WINDOW)
+    log(f"Своя модель подключена: {target}")
+    return "_custom"
+
+
 def detect_device():
     try:
         out = subprocess.run(
@@ -340,6 +365,7 @@ def process(args):
         log("(включите «Перезаписывать готовые», чтобы пересоздать)")
         return
 
+    args.model = resolve_model(args.model)
     if args.device == "auto":
         args.device = detect_device()
     if args.compute_type == "auto":
@@ -420,6 +446,13 @@ def process(args):
         for w in written:
             log("  " + w)
     finally:
+        if args.model == "_custom":
+            link = os.path.join(APP_DIR, "xxl", "_models",
+                                "faster-whisper-_custom")
+            try:
+                os.rmdir(link)  # удаляет только ссылку, не содержимое
+            except OSError:
+                pass
         if args.keep_temp:
             log(f"Временные файлы сохранены: {tmp}")
         else:
