@@ -7,3 +7,5 @@
 !launcher.cs
 !T.ico
 !setup.ps1
+!assets/
+!assets/**
